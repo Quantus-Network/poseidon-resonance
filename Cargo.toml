@@ -1,6 +1,6 @@
 [package]
 name = "poseidon-resonance"
-version = "0.5.0"
+version = "0.6.0"
 license = "MIT-0"
 authors = ["Resonance Network Developers <hello@resonancenetwork.io>"]
 homepage = "https://resonancenetwork.io"
