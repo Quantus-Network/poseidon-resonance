@@ -19,7 +19,8 @@ use sp_storage::StateVersion;
 use sp_trie::{LayoutV0, LayoutV1, TrieConfiguration};
 
 /// The minimum number of field elements to allocate for the preimage.
-pub const MIN_FIELD_ELEMENT_PREIMAGE_LEN: usize = 94;
+pub const MIN_FIELD_ELEMENT_PREIMAGE_LEN: usize = 188;
+const BIT_32_LIMB_MASK: u64 = 0xFFFF_FFFF;
 
 #[derive(Default)]
 pub struct PoseidonStdHasher(Vec<u8>);
@@ -64,7 +65,7 @@ impl PoseidonHasher {
 
 	pub fn hash_padded(x: &[u8]) -> Vec<u8> {
 		log::debug!(target: "poseidon", "poseidon_hash x: {x:?}");
-		Self::hash_padded_felts(bytes_to_felts(x))
+		Self::hash_padded_felts(injective_bytes_to_felts(x))
 	}
 
 	pub fn hash_no_pad(x: Vec<GoldilocksField>) -> Vec<u8> {
@@ -88,9 +89,9 @@ impl PoseidonHasher {
 		let mut y = x;
 		let (transfer_count, from_account, to_account, amount): (u64, AccountId, AccountId, u128) =
 			Decode::decode(&mut y).expect("already asserted input length. qed");
-		felts.push(GoldilocksField::from_noncanonical_u64(transfer_count));
-		felts.extend(bytes_to_felts(&from_account.encode()));
-		felts.extend(bytes_to_felts(&to_account.encode()));
+		felts.extend(u64_to_felts(transfer_count));
+		felts.extend(digest_bytes_to_felts(&from_account.encode()));
+		felts.extend(digest_bytes_to_felts(&to_account.encode()));
 		felts.extend(u128_to_felts(amount));
 		let hash = PoseidonHasher::hash_no_pad(felts);
 		hash.as_slice()[0..32].try_into().expect("already asserted input length. qed")
@@ -135,22 +136,50 @@ impl Hash for PoseidonHasher {
 }
 
 pub fn u128_to_felts(num: u128) -> Vec<GoldilocksField> {
-	let mut amount_felts: Vec<GoldilocksField> = Vec::with_capacity(2);
-	let amount_high = GoldilocksField::from_noncanonical_u64((num >> 64) as u64);
-	let amount_low = GoldilocksField::from_noncanonical_u64(num as u64);
-	amount_felts.push(amount_high);
-	amount_felts.push(amount_low);
-	amount_felts
+	const FELTS_PER_U128: usize = 4;
+	(0..FELTS_PER_U128)
+		.map(|i| {
+			let shift = 96 - 32 * i;
+			let limb = ((num >> shift) & BIT_32_LIMB_MASK as u128) as u64;
+			GoldilocksField::from_canonical_u64(limb)
+		})
+		.collect::<Vec<_>>()
 }
 
-pub fn bytes_to_felts(input: &[u8]) -> Vec<GoldilocksField> {
+pub fn u64_to_felts(num: u64) -> Vec<GoldilocksField> {
+	[
+		GoldilocksField::from_noncanonical_u64((num >> 32) & BIT_32_LIMB_MASK),
+		GoldilocksField::from_noncanonical_u64(num & BIT_32_LIMB_MASK),
+	]
+	.to_vec()
+}
+
+pub fn injective_bytes_to_felts(input: &[u8]) -> Vec<GoldilocksField> {
+	log::debug!(target: "poseidon", "bytes_to_felts input: {input:?}");
+
+	const BYTES_PER_ELEMENT: usize = 4;
+
+	let mut field_elements: Vec<GoldilocksField> = Vec::new();
+	for chunk in input.chunks(BYTES_PER_ELEMENT) {
+		let mut bytes = [0u8; BYTES_PER_ELEMENT];
+		bytes[..chunk.len()].copy_from_slice(chunk);
+		// Convert the chunk to a field element.
+		let value = u32::from_le_bytes(bytes);
+		let field_element = GoldilocksField::from_noncanonical_u64(value as u64);
+		field_elements.push(field_element);
+	}
+
+	field_elements
+}
+
+pub fn digest_bytes_to_felts(input: &[u8]) -> Vec<GoldilocksField> {
 	log::debug!(target: "poseidon", "bytes_to_felts input: {input:?}");
 
 	const BYTES_PER_ELEMENT: usize = 8;
 
 	let mut field_elements: Vec<GoldilocksField> = Vec::new();
 	for chunk in input.chunks(BYTES_PER_ELEMENT) {
-		let mut bytes = [0u8; 8];
+		let mut bytes = [0u8; BYTES_PER_ELEMENT];
 		bytes[..chunk.len()].copy_from_slice(chunk);
 		// Convert the chunk to a field element.
 		let value = u64::from_le_bytes(bytes);
@@ -161,27 +190,51 @@ pub fn bytes_to_felts(input: &[u8]) -> Vec<GoldilocksField> {
 	field_elements
 }
 
-pub fn felts_to_bytes(input: &[GoldilocksField]) -> Vec<u8> {
+pub fn digest_felts_to_bytes(input: &[GoldilocksField]) -> Vec<u8> {
+	const DIGEST_BYTES_PER_ELEMENT: usize = 8;
+	let mut bytes = [0u8; 32];
+
+	for (i, field_element) in input.iter().enumerate() {
+		let value = field_element.to_noncanonical_u64();
+		let value_bytes = value.to_le_bytes();
+		let start_index = i * DIGEST_BYTES_PER_ELEMENT;
+		let end_index = start_index + DIGEST_BYTES_PER_ELEMENT;
+		bytes[start_index..end_index].copy_from_slice(&value_bytes);
+	}
+
+	bytes.to_vec()
+}
+
+pub fn injective_felts_to_bytes(input: &[GoldilocksField]) -> Vec<u8> {
+	const BYTES_PER_ELEMENT: usize = 4;
 	let mut bytes: Vec<u8> = Vec::new();
 
 	for field_element in input {
 		let value = field_element.to_noncanonical_u64();
-		let value_bytes = value.to_le_bytes();
-		bytes.extend_from_slice(&value_bytes);
+		let value_bytes = &value.to_le_bytes()[..BYTES_PER_ELEMENT];
+		bytes.extend_from_slice(value_bytes);
 	}
 
 	bytes
 }
 
-pub fn string_to_felt(input: &str) -> GoldilocksField {
+pub fn injective_string_to_felts(input: &str) -> Vec<GoldilocksField> {
 	// Convert string to UTF-8 bytes
 	let bytes = input.as_bytes();
 
-	let mut arr = [0u8; 8];
-	arr[..bytes.len()].copy_from_slice(bytes);
+	assert!(bytes.len() <= 8, "String must be at most 8 bytes long");
 
-	let num = u64::from_le_bytes(arr);
-	GoldilocksField::from_noncanonical_u64(num)
+	let mut padded = [0u8; 8];
+	padded[..bytes.len()].copy_from_slice(bytes);
+
+	let first = u32::from_le_bytes(padded[0..4].try_into().unwrap());
+	let second = u32::from_le_bytes(padded[4..8].try_into().unwrap());
+
+	[
+		GoldilocksField::from_noncanonical_u64(first as u64),
+		GoldilocksField::from_noncanonical_u64(second as u64),
+	]
+	.to_vec()
 }
 
 #[cfg(test)]
@@ -320,20 +373,20 @@ mod tests {
 	#[test]
 	fn test_known_value_hashes() {
 		let vectors = [
-			(vec![], "3296f1cf081beeefbcae3ed69023361fb3693581e0c1dd4f7b3c497f349352ba"),
-			(vec![0u8], "3296f1cf081beeefbcae3ed69023361fb3693581e0c1dd4f7b3c497f349352ba"),
+			(vec![], "c4f1020767625056e669e3653f190b7763c6c398a45f1dc20db0d7ed32b14ff7"),
+			(vec![0u8], "c4f1020767625056e669e3653f190b7763c6c398a45f1dc20db0d7ed32b14ff7"),
 			(
 				vec![1u8, 2, 3, 4, 5, 6, 7, 8],
-				"0a56f5068c667a8bbb843c76b44990a1abefa050527a46e8fab9340277d9fde2",
+				"8058a9a0c4a7b7259f4d92edb67bb0e9ff6e73a1919bba5a87d42b403d3194b7",
 			),
-			(vec![255u8; 32], "f109e7cb4b06034659305c2bea7888d2fb4df5409f11a96e3f6b53a116ffb42b"),
+			(vec![255u8; 32], "a60e83f2ade965180e73c201e0b98c0190a9043f1226a9ff5179d82eb7cf89c4"),
 			(
 				b"hello world".to_vec(),
-				"6a0ff40754427fe9928c6b1b39b97b89e362350f6bfd8fdd4b0d0ddb6b712a7f",
+				"2411b11963c8d02338a9b30199b16db61933f81169f628b4288f6bf63beaa152",
 			),
 			(
 				(0u8..32).collect::<Vec<u8>>(),
-				"a3e4e2b7f91e6022eb3e840672c0b75c78f61193583d5a6bc310ab5e16b20fb6",
+				"d43069a7fd879ddb3370ab36b174c873fc7413e92d252bef75389dc824cc7dd2",
 			),
 		];
 		for (input, expected_hex) in vectors.iter() {
